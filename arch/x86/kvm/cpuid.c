@@ -24,6 +24,19 @@
 #include "trace.h"
 #include "pmu.h"
 
+
+atomic_long_t exit_counter = ATOMIC_INIT(0);
+EXPORT_SYMBOL(exit_counter);
+
+atomic_long_t total_cycles = ATOMIC_INIT(0);
+EXPORT_SYMBOL(total_cycles);
+
+atomic_t et_counter[67] = ATOMIC_INIT(0);
+EXPORT_SYMBOL(et_counter);
+
+atomic_long_t et_total_cycles[67] = ATOMIC_INIT(0);
+EXPORT_SYMBOL(et_total_cycles);
+
 static u32 xstate_required_size(u64 xstate_bv, bool compacted)
 {
 	int feature_bit = 0;
@@ -363,7 +376,7 @@ static inline void do_cpuid_7_mask(struct kvm_cpuid_entry2 *entry, int index)
 
 	/* cpuid 7.0.ecx*/
 	const u32 kvm_cpuid_7_0_ecx_x86_features =
-		F(AVX512VBMI) | F(LA57) | F(PKU) | 0 /*OSPKE*/ | F(RDPID) |
+		F(AVX512VBMI) | F(LA57) | F(PKU) | 0 /*OSPKE*/ |
 		F(AVX512_VPOPCNTDQ) | F(UMIP) | F(AVX512_VBMI2) | F(GFNI) |
 		F(VAES) | F(VPCLMULQDQ) | F(AVX512_VNNI) | F(AVX512_BITALG) |
 		F(CLDEMOTE) | F(MOVDIRI) | F(MOVDIR64B) | 0 /*WAITPKG*/;
@@ -504,7 +517,7 @@ static inline int __do_cpuid_func(struct kvm_cpuid_entry2 *entry, u32 function,
 
 	r = -E2BIG;
 
-	if (WARN_ON(*nent >= maxnent))
+	if (*nent >= maxnent)
 		goto out;
 
 	do_host_cpuid(entry, function, 0);
@@ -778,11 +791,6 @@ static inline int __do_cpuid_func(struct kvm_cpuid_entry2 *entry, u32 function,
 	case 0x8000001a:
 	case 0x8000001e:
 		break;
-	/* Support memory encryption cpuid if host supports it */
-	case 0x8000001F:
-		if (!boot_cpu_has(X86_FEATURE_SEV))
-			entry->eax = entry->ebx = entry->ecx = entry->edx = 0;
-		break;
 	/*Add support for Centaur's CPUID instruction*/
 	case 0xC0000000:
 		/*Just support up to 0xC0000004 now*/
@@ -815,14 +823,13 @@ out:
 static int do_cpuid_func(struct kvm_cpuid_entry2 *entry, u32 func,
 			 int *nent, int maxnent, unsigned int type)
 {
-	if (*nent >= maxnent)
-		return -E2BIG;
-
 	if (type == KVM_GET_EMULATED_CPUID)
 		return __do_cpuid_func_emulated(entry, func, nent, maxnent);
 
 	return __do_cpuid_func(entry, func, nent, maxnent);
 }
+
+#undef F
 
 struct kvm_cpuid_param {
 	u32 func;
@@ -1021,12 +1028,6 @@ bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
 		*ebx = entry->ebx;
 		*ecx = entry->ecx;
 		*edx = entry->edx;
-		if (function == 7 && index == 0) {
-			u64 data;
-		        if (!__kvm_get_msr(vcpu, MSR_IA32_TSX_CTRL, &data, true) &&
-			    (data & TSX_CTRL_CPUID_CLEAR))
-				*ebx &= ~(F(RTM) | F(HLE));
-		}
 	} else {
 		*eax = *ebx = *ecx = *edx = 0;
 		/*
@@ -1053,12 +1054,96 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 {
 	u32 eax, ebx, ecx, edx;
 
+
 	if (cpuid_fault_enabled(vcpu) && !kvm_require_cpl(vcpu, 0))
 		return 1;
 
 	eax = kvm_rax_read(vcpu);
 	ecx = kvm_rcx_read(vcpu);
+	int i;
+	
+	if (eax == 0x4FFFFFFF)
+	{	
+		//eax = exit_counter;
+		eax = atomic_long_read(&exit_counter);
+		
+	}
+	else if(eax == 0x4FFFFFFE)
+	{
+		u64 tcycles = 0;
+		tcycles = atomic_long_read(&total_cycles);
+		ebx = tcycles >>32 & 0xFFFFFFFF;
+		ecx = tcycles & 0xFFFFFFFF;
+		eax = 0;
+		edx = 0;
+	}
+	else if(eax == 0x4FFFFFFD)
+	{
+		for (i=0; i<=66; i++)	
+		{	
+			if(ecx == i)
+			{
+				if(ecx == 35 || ecx == 38 || ecx == 42 || ecx == 65 || ecx == 66)
+				{
+					eax = 0;
+					ebx = 0;
+					ecx = 0;
+					edx = 0xFFFFFFFF;
+				}
+				else if(ecx == 3 || ecx == 4 || ecx == 5 || ecx == 6 || ecx == 11|| ecx == 16 || ecx == 17 || ecx == 33 || ecx == 34)
+				{
+					eax = 0;
+					ebx = 0;
+					ecx = 0;
+					edx = 0;
+				}
+				else	
+				{	
+					eax = atomic_read(&et_counter[i]);
+					printk(KERN_INFO "exit counter:%u\n",eax);
+				}					
+			}
+		}
+	}
+	else if(eax == 0x4FFFFFFC)
+	{
+		for (i=0; i<=66; i++)	
+		{	
+			if(ecx == i)
+			{
+				if(ecx == 35 || ecx == 38 || ecx == 42 || ecx == 65 || ecx == 66)
+				{
+					eax = 0;
+					ebx = 0;
+					ecx = 0;
+					edx = 0xFFFFFFFF;
+				}
+				else if(ecx == 3 || ecx == 4 || ecx == 5 || ecx == 6 || ecx == 11|| ecx == 16 || ecx == 17 || ecx == 33 || ecx == 34)
+				{
+					eax = 0;
+					ebx = 0;
+					ecx = 0;
+					edx = 0;
+				}
+				else	
+				{	
+					u64 tcycles = 0;
+					tcycles = atomic_long_read(&et_total_cycles[i]);
+					ebx = tcycles >>32 & 0xFFFFFFFF;
+					ecx = tcycles & 0xFFFFFFFF;
+					eax = 0;
+					edx = 0;
+				}					
+			}
+		}
+	}
+	else
+	{
 	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+	}
+	
+	
+	
 	kvm_rax_write(vcpu, eax);
 	kvm_rbx_write(vcpu, ebx);
 	kvm_rcx_write(vcpu, ecx);
